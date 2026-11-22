@@ -24,6 +24,37 @@ if [ $s -ne 0 ]; then printf '\nPress Return to close. '; read -r _; fi
 exit $s
 ]]
 
+-- find_block looks through what the server returned for a block: the first
+-- block id, or, with a label, the block that has it.
+local function find_block(t, label, depth)
+  depth = depth or 0
+  if type(t) ~= "table" or depth > 12 then return nil end
+  if label == nil then
+    if type(t.block_ids) == "table" and t.block_ids[1] then return t.block_ids[1] end
+    if t.block_id and t.flavor then return t.block_id end
+  elseif t.block_id and t.label == label then
+    return t.block_id
+  end
+  for _, v in pairs(t) do
+    local found = find_block(v, label, depth + 1)
+    if found then return found end
+  end
+  return nil
+end
+
+-- managed says whether the session belongs to a tool that manages it: tr3x's
+-- T3 Code session ("T3 Code", or "T3 Code · <machine>" with one per machine).
+local function managed(session_id)
+  local ok, r = pcall(rex.call, "session.list", {})
+  if not ok or type(r) ~= "table" then return false end
+  for _, s in ipairs(r.sessions or r) do
+    if s.session_id == session_id then
+      return type(s.label) == "string" and s.label:sub(1, 7) == "T3 Code"
+    end
+  end
+  return false
+end
+
 local function glance(ctx)
   local items = {}
   for _, m in ipairs(config.machines) do
@@ -37,11 +68,27 @@ local function glance(ctx)
   local block = { flavor = "com.superlogical.terminal.shell", label = "Glance: " .. name,
     options = { shell = "none", login = false,
       command = { "/bin/sh", "-c", WRAP, "glance", config.bin, "look", host } } }
-  if ctx and ctx.session_id then
-    local _, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.05, 0.05, 0.9, 0.9 },
+  -- A floater over the window you're in, unless that window is another
+  -- tool's to manage: tr3x keeps the T3 Code session in step with T3 and
+  -- moves focus back to its own panes, so there Glance gets a session of its
+  -- own instead.
+  if ctx and ctx.session_id and not managed(ctx.session_id) then
+    local r, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.05, 0.05, 0.9, 0.9 },
       focus = true, layout = { block = block } }
-    rex.session.disown_block{ session_id = ctx.session_id }
     if err then error(err, 0) end
+    rex.session.disown_block{ session_id = ctx.session_id }
+    -- focus = true should be enough, but the palette closing can hand focus
+    -- back to where it was, so focus the new block once more by its id.
+    local id = find_block(r)
+    if id == nil then
+      local view = rex.session.view{ session_id = ctx.session_id }
+      id = find_block(view, block.label)
+    end
+    if id then
+      rex.session.focus_block{ session_id = ctx.session_id, block_id = id }
+    else
+      rex.log("warn", "glance: couldn't find the new block to focus; new_layer returned " .. rex.json.encode(r or {}))
+    end
     return
   end
   local s, err = rex.call("session.create", { label = "Glance: " .. name,

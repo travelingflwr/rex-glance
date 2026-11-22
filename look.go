@@ -338,9 +338,56 @@ func (s *screen) write(b []byte) {
 	s.bytesSent += len(b)
 }
 
+// send passes one event to the machine: a mouse report mapped from the
+// picture to the screen, or a key with its modifiers pressed around it.
+func (s *screen) send(c *rfbConn, ms *mouseState, ev event) error {
+	if ev.mouse {
+		s.mu.Lock()
+		w, h, fbW, fbH := s.imgW, s.imgH, s.fb.W, s.fb.H
+		s.mu.Unlock()
+		if !ev.motion && ev.press && (ev.x >= w || ev.y >= h) {
+			return nil // a click outside the picture (the status line) goes nowhere
+		}
+		x := clamp(ev.x, 0, w-1) * fbW / max(w, 1)
+		y := clamp(ev.y, 0, h-1) * fbH / max(h, 1)
+		for _, mask := range ms.pointer(ev) {
+			if err := c.pointer(mask, x, y); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var mods []uint32
+	for _, m := range []struct {
+		on bool
+		ks uint32
+	}{{ev.ctrl, ksControlL}, {ev.alt, ksAltL}, {ev.shift, ksShiftL}, {ev.super, ksSuperL}} {
+		if m.on {
+			mods = append(mods, m.ks)
+		}
+	}
+	for _, m := range mods {
+		if err := c.key(true, m); err != nil {
+			return err
+		}
+	}
+	if err := c.key(true, ev.keysym); err != nil {
+		return err
+	}
+	if err := c.key(false, ev.keysym); err != nil {
+		return err
+	}
+	for i := len(mods) - 1; i >= 0; i-- {
+		if err := c.key(false, mods[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *screen) status() {
 	secs := time.Since(s.since).Seconds()
-	line := fmt.Sprintf(" %s · %d×%d · %.0f updates/s · %.0f KB/s · q quits ",
+	line := fmt.Sprintf(" %s · %d×%d · %.0f updates/s · %.0f KB/s · Ctrl-] quits ",
 		s.host, s.fb.W, s.fb.H, float64(s.frames)/max(secs, 1), float64(s.bytesSent)/1024/max(secs, 1))
 	s.write([]byte(fmt.Sprintf("\x1b7\x1b[%d;1H\x1b[2K\x1b[7m%s\x1b[0m\x1b8", s.rows, line)))
 }
@@ -353,21 +400,71 @@ func view(c *rfbConn, fb *framebuffer, host string) error {
 	}
 	defer term.Restore(fd, old)
 	s := &screen{out: os.Stdout, fb: fb, host: host, since: time.Now()}
-	os.Stdout.WriteString("\x1b[?25l") // hide the cursor
+	os.Stdout.WriteString("\x1b]2;Glance: " + host + "\x07") // the pane's title
+	os.Stdout.WriteString("\x1b[?25l")                       // hide the cursor
 	defer os.Stdout.WriteString("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[?25h\x1b[H\x1b[2J")
 
 	quit := make(chan error, 2)
-	// Keys: q or Ctrl-C quits (keys go to the machine in the next step).
+	// Mouse reports in pixels: buttons, drags, and moves with no button.
+	os.Stdout.WriteString("\x1b[?1003h\x1b[?1006h\x1b[?1016h")
+	defer os.Stdout.WriteString("\x1b[?1016l\x1b[?1006l\x1b[?1003l")
+	// Clicks and keys go to the machine; Ctrl-] quits. A sequence cut off by
+	// a read waits for its rest; a lone Escape is the Escape key once 30 ms
+	// pass with nothing after it.
+	chunks := make(chan []byte, 64)
 	go func() {
-		buf := make([]byte, 256)
+		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				chunks <- append([]byte(nil), buf[:n]...)
+			}
 			if err != nil {
+				close(chunks)
+				return
+			}
+		}
+	}()
+	go func() {
+		var pending []byte
+		ms := &mouseState{}
+		// handle sends the events in pending, keeping what's unfinished.
+		handle := func(final bool) bool {
+			evs, used := parseInput(pending, final)
+			pending = append(pending[:0], pending[used:]...)
+			for _, ev := range evs {
+				if ev.quit {
+					quit <- nil
+					return false
+				}
+				if err := s.send(c, ms, ev); err != nil {
+					quit <- err
+					return false
+				}
+			}
+			return true
+		}
+		for {
+			var b []byte
+			var ok bool
+			if len(pending) > 0 {
+				select {
+				case b, ok = <-chunks:
+				case <-time.After(30 * time.Millisecond):
+					if !handle(true) {
+						return
+					}
+					continue
+				}
+			} else {
+				b, ok = <-chunks
+			}
+			if !ok {
 				quit <- nil
 				return
 			}
-			if bytes.ContainsAny(buf[:n], "q\x03") {
-				quit <- nil
+			pending = append(pending, b...)
+			if !handle(false) {
 				return
 			}
 		}

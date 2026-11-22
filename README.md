@@ -34,12 +34,25 @@ For now, the two machines here with a desktop: a Mac running Screen Sharing, and
 - **The login:** Apple Remote Desktop's Diffie-Hellman scheme (security type 30), which macOS Screen Sharing requires and wayvnc offers too, so one login covers Macs and Linux. It uses the far machine's username and password.
 - **The password:** kept in the system keychain, or asked for each time. Never in a file.
 
+## Use
+
+```sh
+rex-glance look <machine>          # the screen here: click, scroll and type on it; Ctrl-] quits
+rex-glance look <machine> --snapshot out.png
+rex-glance reach <machine>         # can its screen sharing be reached, and how (no login)
+```
+
+In Rex, **Glance at…** (from `glance.lua`) picks a machine and opens it in a floating window. In a session another tool manages, such as tr3x's T3 Code session, it opens in a session of its own. The first time, it asks for the password with typing hidden, and offers to keep it in the Keychain once the login works.
+
+Keys reach the machine as typed, Ctrl-C included, so Ctrl-] quits, the way telnet does. ⌘ stays with Rex for its own shortcuts, so ⌘-shortcuts don't reach a Mac yet.
+
 ## Plan
 
-1. **Probes.** In a Rex pane: can kitty graphics frames replace a rectangle in place, how fast, and does Rex report mouse positions per pixel or per cell?
-2. **Look.** Connect, log in, and show the screen. Decode Raw, CopyRect and ZRLE, with incremental updates drawn as changed rectangles.
-3. **Poke.** Clicks, drags, scrolling and keys, mapped from the pane to the remote screen. Zoom in on a region for precise clicks.
-4. **From the palette.** "Glance at…" picks a machine and opens a pane on it.
+1. ✓ **Probes.** Rex replaces image rectangles in place (about 10,000 64×64 tiles a second) and reports the mouse per pixel.
+2. ✓ **Look.** Connect, log in, and show the screen, redrawing only the rectangles that change.
+3. ✓ **Poke.** Clicks, drags, scrolling and keys, mapped from the pane to the remote screen.
+4. ✓ **From the palette.** "Glance at…" picks a machine and opens it.
+5. **Next:** a way to send ⌘ to a Mac; ask in the window when Rex's palette can't (older Rex apps); 16-bit colour for slow links.
 
 ## Credit
 

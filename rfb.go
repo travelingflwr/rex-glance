@@ -17,6 +17,7 @@ import (
 	"io"
 	"math/big"
 	"strings"
+	"sync"
 )
 
 // Encodings rex-glance asks for, best first for latency on a LAN or tailnet.
@@ -29,6 +30,7 @@ const (
 )
 
 type rfbConn struct {
+	wmu    sync.Mutex // input and update requests write from different goroutines
 	rw     io.ReadWriteCloser
 	r      *bufio.Reader
 	Width  int
@@ -37,6 +39,14 @@ type rfbConn struct {
 
 	zrle *inflater // ZRLE's zlib stream, which runs across every rectangle
 	zlib *inflater // the Zlib encoding's, a separate stream
+}
+
+// send writes one whole client message.
+func (c *rfbConn) send(msg []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	_, err := c.rw.Write(msg)
+	return err
 }
 
 func (c *rfbConn) read(n int) ([]byte, error) {
@@ -261,8 +271,7 @@ func (c *rfbConn) setPixelFormat() error {
 		0, 255, 0, 255, 0, 255, // red, green, blue max
 		16, 8, 0, // shifts
 		0, 0, 0}
-	_, err := c.rw.Write(msg)
-	return err
+	return c.send(msg)
 }
 
 func (c *rfbConn) setEncodings(encs ...int32) error {
@@ -270,8 +279,7 @@ func (c *rfbConn) setEncodings(encs ...int32) error {
 	for _, e := range encs {
 		msg = binary.BigEndian.AppendUint32(msg, uint32(e))
 	}
-	_, err := c.rw.Write(msg)
-	return err
+	return c.send(msg)
 }
 
 // request asks for an update of the whole screen; incremental asks only for
@@ -284,8 +292,7 @@ func (c *rfbConn) request(incremental bool) error {
 	msg := []byte{3, inc, 0, 0, 0, 0}
 	msg = binary.BigEndian.AppendUint16(msg, uint16(c.Width))
 	msg = binary.BigEndian.AppendUint16(msg, uint16(c.Height))
-	_, err := c.rw.Write(msg)
-	return err
+	return c.send(msg)
 }
 
 // pointer sends the mouse position and buttons (bit 0 left, 1 middle, 2
@@ -294,8 +301,7 @@ func (c *rfbConn) pointer(buttons byte, x, y int) error {
 	msg := []byte{5, buttons}
 	msg = binary.BigEndian.AppendUint16(msg, uint16(clamp(x, 0, c.Width-1)))
 	msg = binary.BigEndian.AppendUint16(msg, uint16(clamp(y, 0, c.Height-1)))
-	_, err := c.rw.Write(msg)
-	return err
+	return c.send(msg)
 }
 
 // key sends a key press or release, as an X keysym.
@@ -306,8 +312,7 @@ func (c *rfbConn) key(down bool, keysym uint32) error {
 	}
 	msg := []byte{4, d, 0, 0}
 	msg = binary.BigEndian.AppendUint32(msg, keysym)
-	_, err := c.rw.Write(msg)
-	return err
+	return c.send(msg)
 }
 
 func clamp(v, lo, hi int) int {
