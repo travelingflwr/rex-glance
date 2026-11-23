@@ -36,6 +36,14 @@ type rfbConn struct {
 	Width  int
 	Height int
 	Name   string
+	Mac    bool // macOS Screen Sharing, which greets with RFB 003.889
+
+	// resizeLock, when set, is held while the framebuffer is reallocated,
+	// so drawing from another goroutine never reads it halfway.
+	resizeLock sync.Locker
+
+	// What the server has sent, for bench: rectangles by encoding.
+	EncRects map[int32]int
 
 	zrle *inflater // ZRLE's zlib stream, which runs across every rectangle
 	zlib *inflater // the Zlib encoding's, a separate stream
@@ -85,6 +93,7 @@ func handshake(rw io.ReadWriteCloser, user, password string) (*rfbConn, error) {
 	if !strings.HasPrefix(string(banner), "RFB ") {
 		return nil, fmt.Errorf("not a VNC server (it said %q)", banner)
 	}
+	c.Mac = strings.HasPrefix(string(banner), "RFB 003.889")
 	if _, err := rw.Write([]byte("RFB 003.008\n")); err != nil {
 		return nil, err
 	}
@@ -355,9 +364,18 @@ func (c *rfbConn) next(fb *framebuffer) (changed []Rect, resized bool, err error
 			enc := int32(binary.BigEndian.Uint32(h[8:]))
 			if enc == encDesktopSize {
 				c.Width, c.Height = r.W, r.H
+				if c.resizeLock != nil {
+					c.resizeLock.Lock()
+				}
 				fb.resize(r.W, r.H)
+				if c.resizeLock != nil {
+					c.resizeLock.Unlock()
+				}
 				resized = true
 				continue
+			}
+			if c.EncRects != nil {
+				c.EncRects[enc]++
 			}
 			if err := c.decode(fb, r, enc); err != nil {
 				return nil, false, err
@@ -388,5 +406,6 @@ func (c *rfbConn) next(fb *framebuffer) (changed []Rect, resized bool, err error
 		_, err = c.read(int(n))
 		return nil, false, err
 	}
+	glog.printf("unknown server message type %d", t)
 	return nil, false, fmt.Errorf("unknown server message type %d", t)
 }

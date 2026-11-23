@@ -155,3 +155,32 @@ func TestParseChoices(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestCommandChordOnAMac(t *testing.T) {
+	// Ctrl+Option+C arrives as Escape then Ctrl-C.
+	evs, _ := parseInput([]byte("\x1b\x03"), true)
+	if len(evs) != 1 || !evs[0].ctrl || !evs[0].alt || evs[0].keysym != 'c' {
+		t.Fatalf("parsed %+v", evs)
+	}
+	if ev := commandChord(evs[0], true); !ev.super || ev.ctrl || ev.alt {
+		t.Fatalf("on a Mac it's ⌘C: %+v", ev)
+	}
+	if ev := commandChord(evs[0], false); ev.super || !ev.ctrl || !ev.alt {
+		t.Fatalf("on Linux it stays Ctrl+Alt+C: %+v", ev)
+	}
+	if ev := commandChord(event{keysym: 'c', ctrl: true}, true); ev.super {
+		t.Fatal("Ctrl alone stays Ctrl")
+	}
+	// ⌘ goes out as Super_L, which Screen Sharing reads as Command.
+	w := &bufConn{}
+	c := &rfbConn{rw: w, Width: 10, Height: 10}
+	s := &screen{fb: newFramebuffer(10, 10), imgW: 10, imgH: 10}
+	s.send(c, &mouseState{}, commandChord(event{keysym: ' ', ctrl: true, alt: true}, true))
+	var seq []string
+	for b := w.Bytes(); len(b) >= 8; b = b[8:] {
+		seq = append(seq, fmt.Sprintf("%v:%#x", b[1] == 1, binary.BigEndian.Uint32(b[4:])))
+	}
+	if strings.Join(seq, " ") != "true:0xffeb true:0x20 false:0x20 false:0xffeb" {
+		t.Fatalf("⌘Space: %v", seq)
+	}
+}

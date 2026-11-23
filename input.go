@@ -269,3 +269,14 @@ func (m *mouseState) pointer(ev event) []byte {
 	}
 	return []byte{m.held}
 }
+
+// commandChord is how ⌘ reaches a Mac: Rex keeps ⌘ for its own shortcuts,
+// so Ctrl+Option and a key sends that key with ⌘ (Super_L, which macOS
+// Screen Sharing reads as Command), the way rootshell does. Only for a Mac:
+// on Linux, Ctrl+Alt stays itself (Ctrl+Alt+T and the like).
+func commandChord(ev event, mac bool) event {
+	if mac && !ev.mouse && ev.ctrl && ev.alt {
+		ev.ctrl, ev.alt, ev.super = false, false, true
+	}
+	return ev
+}

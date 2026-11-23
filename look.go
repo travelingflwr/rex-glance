@@ -20,6 +20,7 @@ import (
 	"os/user"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -274,10 +275,13 @@ type screen struct {
 	rows        int
 	xs0, xs1    []int // for each drawn column, the screen columns it averages
 	ys0, ys1    []int
+	shown       []byte // the framebuffer as last drawn, to skip what didn\'t really change
 
 	frames    int
 	bytesSent int
 	since     time.Time
+	mac       bool // a Mac: Ctrl+Option sends ⌘
+	degraded  bool // dropped to 1× because drawing was slow
 }
 
 // layout fits the remote screen into the pane, keeping its shape and leaving
@@ -334,7 +338,13 @@ func (s *screen) sample(r Rect) (ox, oy, ow, oh int, pix []byte) {
 	if ow <= 0 || oh <= 0 {
 		return 0, 0, 0, 0, nil
 	}
-	pix = make([]byte, ow*oh*3)
+	return ox, oy, ow, oh, s.sampleOut(ox, oy, ow, oh)
+}
+
+// sampleOut is the drawn picture's rectangle at ox,oy, ow×oh, as RGB.
+func (s *screen) sampleOut(ox, oy, ow, oh int) []byte {
+	ox1, oy1 := ox+ow, oy+oh
+	pix := make([]byte, ow*oh*3)
 	i := 0
 	W := s.fb.W
 	for y := oy; y < oy1; y++ {
@@ -361,7 +371,7 @@ func (s *screen) sample(r Rect) (ox, oy, ow, oh int, pix []byte) {
 			i += 3
 		}
 	}
-	return
+	return pix
 }
 
 func deflate(b []byte) []byte {
@@ -376,6 +386,7 @@ func deflate(b []byte) []byte {
 func (s *screen) full() {
 	s.layout()
 	_, _, w, h, pix := s.sample(Rect{0, 0, s.fb.W, s.fb.H})
+	s.shown = append(s.shown[:0], s.fb.Pix...)
 	var b bytes.Buffer
 	b.WriteString("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[H\x1b[2J")
 	kitty(&b, fmt.Sprintf("a=T,i=1,f=24,s=%d,v=%d,c=%d,r=%d,o=z,q=2,C=1", w, h, s.cols, s.crows), deflate(pix))
@@ -383,26 +394,92 @@ func (s *screen) full() {
 	s.status()
 }
 
-// patch redraws the changed rectangles, as edits of image 1 in place.
+// patch redraws what changed, as edits of image 1 in place. The changes are
+// marked on a grid of 32-pixel tiles of the drawn picture, and each run of
+// changed tiles along a row is redrawn as one rectangle: a blinking cursor,
+// a clock and some typing cost a few tiles, not a box around all three.
 func (s *screen) patch(changed []Rect) {
-	if len(changed) > 32 { // many small changes: one rectangle around them all
-		u := changed[0]
-		for _, r := range changed[1:] {
-			x0, y0 := min(u.X, r.X), min(u.Y, r.Y)
-			u = Rect{x0, y0, max(u.X+u.W, r.X+r.W) - x0, max(u.Y+u.H, r.Y+r.H) - y0}
+	const tile = 32
+	cols, rows := (s.rW+tile-1)/tile, (s.rH+tile-1)/tile
+	if cols == 0 || rows == 0 {
+		return
+	}
+	marked := make([]bool, cols*rows)
+	fx := float64(s.rW) / float64(s.fb.W)
+	fy := float64(s.rH) / float64(s.fb.H)
+	for _, r := range changed {
+		x0 := clamp(int(float64(r.X)*fx)/tile, 0, cols-1)
+		y0 := clamp(int(float64(r.Y)*fy)/tile, 0, rows-1)
+		x1 := clamp(int(float64(r.X+r.W)*fx+0.999-1)/tile, 0, cols-1)
+		y1 := clamp(int(float64(r.Y+r.H)*fy+0.999-1)/tile, 0, rows-1)
+		for ty := y0; ty <= y1; ty++ {
+			for tx := x0; tx <= x1; tx++ {
+				marked[ty*cols+tx] = true
+			}
 		}
-		changed = []Rect{u}
+	}
+	// A server may say a large area changed when only a little did (macOS
+	// Screen Sharing reports most of a window for a typed letter): keep only
+	// the tiles whose pixels differ from what was last drawn.
+	if len(s.shown) == len(s.fb.Pix) {
+		for ty := 0; ty < rows; ty++ {
+			for tx := 0; tx < cols; tx++ {
+				if i := ty*cols + tx; marked[i] && !s.tileChanged(tx*tile, ty*tile, tile) {
+					marked[i] = false
+				}
+			}
+		}
+	} else {
+		s.shown = append(s.shown[:0], s.fb.Pix...)
 	}
 	var b bytes.Buffer
-	for _, r := range changed {
-		ox, oy, w, h, pix := s.sample(r)
-		if pix == nil {
-			continue
+	for ty := 0; ty < rows; ty++ {
+		for tx := 0; tx < cols; tx++ {
+			if !marked[ty*cols+tx] {
+				continue
+			}
+			run := tx
+			for run+1 < cols && marked[ty*cols+run+1] {
+				run++
+			}
+			ox, oy := tx*tile, ty*tile
+			w, h := min((run+1)*tile, s.rW)-ox, min((ty+1)*tile, s.rH)-oy
+			pix := s.sampleOut(ox, oy, w, h)
+			kitty(&b, fmt.Sprintf("a=f,i=1,r=1,x=%d,y=%d,s=%d,v=%d,f=24,o=z,q=2", ox, oy, w, h), deflate(pix))
+			s.remember(ox, oy, w, h)
+			tx = run
 		}
-		kitty(&b, fmt.Sprintf("a=f,i=1,r=1,x=%d,y=%d,s=%d,v=%d,f=24,o=z,q=2", ox, oy, w, h), deflate(pix))
 	}
 	s.write(b.Bytes())
 	s.frames++
+}
+
+// source is the framebuffer area a drawn rectangle comes from.
+func (s *screen) source(ox, oy, w, h int) (x0, y0, x1, y1 int) {
+	ox1, oy1 := min(ox+w, s.rW), min(oy+h, s.rH)
+	return s.xs0[ox], s.ys0[oy], s.xs1[ox1-1], s.ys1[oy1-1]
+}
+
+// tileChanged says whether the screen pixels under a drawn tile differ from
+// what was last drawn there.
+func (s *screen) tileChanged(ox, oy, size int) bool {
+	x0, y0, x1, y1 := s.source(ox, oy, min(size, s.rW-ox), min(size, s.rH-oy))
+	for y := y0; y < y1; y++ {
+		i, j := (y*s.fb.W+x0)*3, (y*s.fb.W+x1)*3
+		if !bytes.Equal(s.fb.Pix[i:j], s.shown[i:j]) {
+			return true
+		}
+	}
+	return false
+}
+
+// remember notes the screen pixels under a drawn rectangle as shown.
+func (s *screen) remember(ox, oy, w, h int) {
+	x0, y0, x1, y1 := s.source(ox, oy, w, h)
+	for y := y0; y < y1; y++ {
+		i, j := (y*s.fb.W+x0)*3, (y*s.fb.W+x1)*3
+		copy(s.shown[i:j], s.fb.Pix[i:j])
+	}
 }
 
 func (s *screen) write(b []byte) {
@@ -459,8 +536,15 @@ func (s *screen) send(c *rfbConn, ms *mouseState, ev event) error {
 
 func (s *screen) status() {
 	secs := time.Since(s.since).Seconds()
-	line := fmt.Sprintf(" %s · %d×%d · %.0f updates/s · %.0f KB/s · Ctrl-] quits ",
-		s.host, s.fb.W, s.fb.H, float64(s.frames)/max(secs, 1), float64(s.bytesSent)/1024/max(secs, 1))
+	keys := "Ctrl-] quits"
+	if s.mac {
+		keys = "Ctrl+Option+key: ⌘key · Ctrl-] quits"
+	}
+	if s.degraded {
+		keys = "1× (slow link) · " + keys
+	}
+	line := fmt.Sprintf(" %s · %d×%d · %.0f updates/s · %.0f KB/s · %s ",
+		s.host, s.fb.W, s.fb.H, float64(s.frames)/max(secs, 1), float64(s.bytesSent)/1024/max(secs, 1), keys)
 	s.write([]byte(fmt.Sprintf("\x1b7\x1b[%d;1H\x1b[2K\x1b[7m%s\x1b[0m\x1b8", s.rows, line)))
 }
 
@@ -471,12 +555,15 @@ func view(c *rfbConn, fb *framebuffer, host string, density int) error {
 		return fmt.Errorf("look needs a terminal (or use --snapshot): %w", err)
 	}
 	defer term.Restore(fd, old)
-	s := &screen{out: os.Stdout, fb: fb, host: host, density: density, since: time.Now()}
+	s := &screen{out: os.Stdout, fb: fb, host: host, density: density, mac: c.Mac, since: time.Now()}
+	openLog(host)
+	glog.printf("screen %dx%d, mac=%v, density %d", fb.W, fb.H, c.Mac, density)
 	os.Stdout.WriteString("\x1b]2;Glance: " + host + "\x07") // the pane's title
 	os.Stdout.WriteString("\x1b[?25l")                       // hide the cursor
 	defer os.Stdout.WriteString("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[?25h\x1b[H\x1b[2J")
 
 	quit := make(chan error, 2)
+	defer func() { glog.printf("view ended") }()
 	// Mouse reports in pixels: buttons, drags, and moves with no button.
 	os.Stdout.WriteString("\x1b[?1003h\x1b[?1006h\x1b[?1016h")
 	defer os.Stdout.WriteString("\x1b[?1016l\x1b[?1006l\x1b[?1003l")
@@ -509,7 +596,7 @@ func view(c *rfbConn, fb *framebuffer, host string, density int) error {
 					quit <- nil
 					return false
 				}
-				if err := s.send(c, ms, ev); err != nil {
+				if err := s.send(c, ms, commandChord(ev, c.Mac)); err != nil {
 					quit <- err
 					return false
 				}
@@ -552,27 +639,29 @@ func view(c *rfbConn, fb *framebuffer, host string, density int) error {
 	if err := c.request(false); err != nil {
 		return err
 	}
-	// The screen: apply each update, draw what changed, ask for the next.
+	// The screen, in two parts that never wait for each other. The reader
+	// applies each update to the framebuffer, notes what changed, and asks for
+	// the next one at once. The drawer paints what changed since it last drew:
+	// on a slow link it paints less often, but always the newest picture, and
+	// the server's stream never stalls behind it.
+	var lastUpdate atomic.Int64
+	lastUpdate.Store(time.Now().UnixNano())
+	c.resizeLock = &s.mu
+	var dirtyMu sync.Mutex
+	var dirty []Rect
+	needFull := false
+	wake := make(chan struct{}, 1)
 	go func() {
-		tick := time.Now()
+		n := 0
 		for {
+			t0 := time.Now()
 			changed, resized, err := c.next(fb)
 			if err != nil {
+				glog.printf("read error: %v", err)
 				quit <- err
 				return
 			}
-			s.mu.Lock()
-			switch {
-			case resized:
-				s.full()
-			case len(changed) > 0:
-				s.patch(changed)
-			}
-			if time.Since(tick) > time.Second {
-				s.status()
-				tick = time.Now()
-			}
-			s.mu.Unlock()
+			lastUpdate.Store(time.Now().UnixNano())
 			if resized {
 				err = c.request(false)
 			} else {
@@ -582,12 +671,72 @@ func view(c *rfbConn, fb *framebuffer, host string, density int) error {
 				quit <- err
 				return
 			}
+			dirtyMu.Lock()
+			dirty = append(dirty, changed...)
+			needFull = needFull || resized
+			dirtyMu.Unlock()
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+			n++
+			if n <= 10 || n%100 == 0 {
+				glog.printf("update %d: %d rects, resized=%v, waited %s", n, len(changed), resized, time.Since(t0).Round(time.Millisecond))
+			}
+		}
+	}()
+	go func() {
+		tick := time.Now()
+		slow := 0
+		for range wake {
+			dirtyMu.Lock()
+			rects, full := dirty, needFull
+			dirty, needFull = nil, false
+			dirtyMu.Unlock()
+			t0 := time.Now()
+			s.mu.Lock()
+			sent0 := s.bytesSent
+			switch {
+			case full:
+				s.full()
+			case len(rects) > 0:
+				s.patch(rects)
+			}
+			if time.Since(tick) > time.Second {
+				s.status()
+				tick = time.Now()
+			}
+			sent := s.bytesSent - sent0
+			d := time.Since(t0)
+			// Drawing is slow when the link to the screen you're looking at
+			// can't keep up: after a few slow draws in a row, draw at the
+			// pane's point size, a quarter of the data.
+			if d > 250*time.Millisecond {
+				slow++
+			} else {
+				slow = 0
+			}
+			if slow >= 3 && s.density > 1 {
+				s.density, s.degraded = 1, true
+				glog.printf("drawing is slow (%s for %d KB): switching to 1×", d.Round(time.Millisecond), sent/1024)
+				s.full()
+				s.status()
+				slow = 0
+			}
+			s.mu.Unlock()
+			if d > 250*time.Millisecond {
+				glog.printf("slow draw: %d rects, %d KB in %s", len(rects), sent/1024, d.Round(time.Millisecond))
+			}
 		}
 	}()
 	for {
 		select {
 		case err := <-quit:
 			return err
+		case <-time.After(5 * time.Second):
+			if last := time.Unix(0, lastUpdate.Load()); time.Since(last) > 5*time.Second {
+				glog.printf("no update for %s", time.Since(last).Round(time.Second))
+			}
 		case <-winch:
 			s.mu.Lock()
 			s.full()

@@ -11,11 +11,15 @@ const usage = `rex-glance: another machine's screen in a Rex pane.
 
   rex-glance look <machine> [--user U] [--ask] [--fast] [--snapshot out.png]
                        that machine's screen here: click, scroll and type
-                       on it; Ctrl-] quits
+                       on it. On a Mac, Ctrl+Option+key sends ⌘key.
+                       Ctrl-] quits
   rex-glance look --choose Name=host …
                        ask in this window which machine, then look
   rex-glance reach <machine>
                        can its screen sharing be reached, and how (no login)
+  rex-glance bench <machine> [--seconds N]
+                       measure its screen sharing: first frame, encodings, and
+                       input-to-update time (nudges the pointer, never clicks)
   rex-glance probe     what this terminal can do: sizes, in-place redraws, mouse
 `
 
@@ -30,6 +34,8 @@ func main() {
 		err = lookCmd(os.Args[2:])
 	case "reach":
 		err = reachCmd(os.Args[2:])
+	case "bench":
+		err = benchCmd(os.Args[2:])
 	case "probe":
 		err = probe()
 	case "rawprobe":

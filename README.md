@@ -37,10 +37,12 @@ For now, the two machines here with a desktop: a Mac running Screen Sharing, and
 ## Use
 
 ```sh
-rex-glance look <machine>          # the screen here: click, scroll and type on it; Ctrl-] quits
+rex-glance look <machine>          # the screen here: click, scroll and type on it
 rex-glance look <machine> --fast   # half the resolution, about a quarter of the data
 rex-glance look <machine> --snapshot out.png
 rex-glance reach <machine>         # can its screen sharing be reached, and how (no login)
+rex-glance bench <machine>         # first frame, encodings, input-to-update time
+rex-glance bench <machine> --rects # just watch: every rectangle the server sends
 ```
 
 In Rex, **Glance at…** (from `glance.lua`) picks a machine and opens it in a floating window. In a session another tool manages, such as tr3x's T3 Code session, it opens in a session of its own. The first time, it asks for the password with typing hidden, and offers to keep it in the Keychain once the login works.
@@ -49,7 +51,16 @@ Rex asks palette questions on every connected app, and the first answer wins. So
 
 The picture fills the pane. It's drawn at twice the pane's point size and fitted to its cells, so text stays sharp on Retina screens, and each drawn pixel averages the screen pixels it covers, so thin strokes survive the shrinking. `--fast` draws at the point size instead.
 
-Keys reach the machine as typed, Ctrl-C included, so Ctrl-] quits, the way telnet does. ⌘ stays with Rex for its own shortcuts, so ⌘-shortcuts don't reach a Mac yet.
+Keys reach the machine as typed, Ctrl-C included, so **Ctrl-] quits**, the way telnet does.
+
+Rex keeps ⌘ for its own shortcuts, so on a Mac **Ctrl+Option+key sends ⌘key**, the way [rootshell](https://github.com/kitknox/rootshell) does: Ctrl+Option+C is ⌘C, Ctrl+Option+Space is ⌘Space. rex-glance knows a Mac by its greeting; on Linux, Ctrl+Alt stays itself.
+
+## How it stays fast
+
+- **The server's stream never waits for the screen.** Each update is applied and the next one requested at once. Drawing runs on its own and paints the newest picture, so a slow link to the screen you're looking at shows fewer frames, never older ones.
+- **Only real change is sent.** Changes are tracked on a grid of 32-pixel tiles, and a tile is redrawn only if its pixels differ from what was last drawn. That matters for macOS Screen Sharing, which reports most of a window as changed for a typed letter: measured on a 1920×1080 Mac, it sent two-thirds of the screen about six times a second while someone typed, and without the check that was 2–3 seconds of lag on an iPad. With it, the lag is gone.
+- **It adapts.** If drawing keeps taking more than a quarter of a second, it drops from 2× to 1× and the status line says so.
+- **Every session is logged** to `~/.local/state/rex-glance/last.log`: update sizes and timings, slow draws, stalls and errors.
 
 ## Plan
 
@@ -57,7 +68,8 @@ Keys reach the machine as typed, Ctrl-C included, so Ctrl-] quits, the way telne
 2. ✓ **Look.** Connect, log in, and show the screen, redrawing only the rectangles that change.
 3. ✓ **Poke.** Clicks, drags, scrolling and keys, mapped from the pane to the remote screen.
 4. ✓ **From the palette.** "Glance at…" picks a machine and opens it.
-5. **Next:** a way to send ⌘ to a Mac; ask in the window when Rex's palette can't (older Rex apps); 16-bit colour for slow links.
+5. ✓ **⌘ for Macs** (Ctrl+Option), and asking which machine in the window where Rex's palette can't.
+6. **Next:** zoom around the pointer for small screens; 16-bit colour for slow links.
 
 ## Credit
 

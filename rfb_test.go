@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os/exec"
 	"testing"
 )
 
@@ -98,7 +99,7 @@ func TestAppleLoginAndInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Width != 8 || c.Height != 4 || c.Name != "fake" {
+	if c.Width != 8 || c.Height != 4 || c.Name != "fake" || !c.Mac {
 		t.Fatalf("%dx%d %q", c.Width, c.Height, c.Name)
 	}
 }
@@ -242,5 +243,66 @@ func TestScaledSample(t *testing.T) {
 	s.buildMaps()
 	if _, _, _, _, pix := s.sample(Rect{1, 1, 1, 1}); pix[0] != fb.Pix[(1*4+1)*3] {
 		t.Fatalf("copied %v", pix)
+	}
+}
+
+// Changes far apart redraw as separate small rectangles, not one box around
+// them all.
+func TestPatchDrawsOnlyChangedTiles(t *testing.T) {
+	var out bytes.Buffer
+	s := &screen{out: &out, fb: newFramebuffer(1000, 1000), rW: 500, rH: 500}
+	s.buildMaps()
+	s.patch([]Rect{{0, 0, 10, 10}, {980, 980, 10, 10}}) // two corners
+	cmds := bytes.Count(out.Bytes(), []byte("a=f,i=1"))
+	if cmds != 2 {
+		t.Fatalf("%d redraws, want 2", cmds)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("x=0,y=0,s=32,v=32")) || !bytes.Contains(out.Bytes(), []byte("x=480,y=480,s=20,v=20")) {
+		t.Fatalf("tiles: %s", bytes.ReplaceAll(out.Bytes(), []byte{0x1b}, []byte("^")))
+	}
+	// A run of changed tiles along a row is one rectangle.
+	out.Reset()
+	for x := 0; x < 200; x++ { // pixels really change across 100 drawn pixels: tiles 0–3
+		s.fb.put(x, 0, 9, 9, 9)
+	}
+	s.patch([]Rect{{0, 0, 200, 10}})
+	if n := bytes.Count(out.Bytes(), []byte("a=f,i=1")); n != 1 || !bytes.Contains(out.Bytes(), []byte("x=0,y=0,s=128,v=32")) {
+		t.Fatalf("run: %d redraws", n)
+	}
+}
+
+// glance.lua must at least compile: Rex loads it from init.lua inside pcall,
+// so a syntax error makes Glance at… vanish without a word.
+func TestGlanceLuaCompiles(t *testing.T) {
+	for _, tool := range [][]string{{"luajit", "-bl"}, {"luac", "-p"}} {
+		if _, err := exec.LookPath(tool[0]); err != nil {
+			continue
+		}
+		out, err := exec.Command(tool[0], append(tool[1:], "glance.lua")...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("glance.lua doesn't compile:\n%s", firstLine(string(out)))
+		}
+		return
+	}
+	t.Skip("no Lua compiler to check glance.lua with")
+}
+
+// A server that says a big area changed when only a little did: only the
+// tiles whose pixels really differ are redrawn.
+func TestPatchSkipsTilesThatDidNotReallyChange(t *testing.T) {
+	var out bytes.Buffer
+	s := &screen{out: &out, fb: newFramebuffer(256, 256), rW: 256, rH: 256}
+	s.buildMaps()
+	s.full()
+	out.Reset()
+	s.fb.put(100, 100, 1, 2, 3)       // one pixel really changes…
+	s.patch([]Rect{{0, 0, 256, 256}}) // …but the whole screen is reported
+	if n := bytes.Count(out.Bytes(), []byte("a=f,i=1")); n != 1 || !bytes.Contains(out.Bytes(), []byte("x=96,y=96,s=32,v=32")) {
+		t.Fatalf("%d redraws: %s", n, bytes.ReplaceAll(out.Bytes(), []byte{0x1b}, []byte("^")))
+	}
+	out.Reset()
+	s.patch([]Rect{{0, 0, 256, 256}}) // nothing new since
+	if out.Len() != 0 {
+		t.Fatal("redrew tiles that hadn't changed")
 	}
 }

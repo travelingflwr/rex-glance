@@ -29,6 +29,20 @@ if [ $s -ne 0 ]; then printf '\nPress Return to close. '; read -r _; fi
 exit $s
 ]]
 
+-- The same, for a Glance in a session of its own: when it ends, the session
+-- goes too, rather than staying behind with no tabs.
+local WRAP_OWN = [[
+"$@"
+s=$?
+if [ $s -ne 0 ]; then printf '\nPress Return to close. '; read -r _; fi
+if [ -n "$REX_SESSION" ]; then
+  for r in rex "$REX_BIN_DIR/rex"; do
+    command -v "$r" >/dev/null 2>&1 && { "$r" kill "$REX_SESSION" >/dev/null 2>&1; break; }
+  done
+fi
+exit $s
+]]
+
 -- find_block looks through what the server returned for a block: the first
 -- block id, or, with a label, the block that has it.
 local function find_block(t, label, depth)
@@ -71,6 +85,16 @@ local function caller_platform(ctx)
   return nil
 end
 
+-- own_session opens Glance in a new session and switches to it. The
+-- session closes itself when Glance ends.
+local function own_session(block, label)
+  block.options.command[3] = WRAP_OWN
+  local s, err = rex.call("session.create", { label = label,
+    initial_windows = { { window_label = label, layout = { block = block } } } })
+  if s == nil then error(err, 0) end
+  rex.client.queue("session.select", { session_id = s.session_id })
+end
+
 local function glance(ctx)
   local items = {}
   for _, m in ipairs(config.machines) do
@@ -103,10 +127,15 @@ local function glance(ctx)
   -- tool's to manage: tr3x keeps the T3 Code session in step with T3 and
   -- moves focus back to its own panes, so there Glance gets a session of its
   -- own instead.
+  -- A session with no tabs left has no window to float over: then, and on
+  -- any other failure, Glance gets a session of its own.
   if ctx and ctx.session_id and not managed(ctx.session_id) then
     local r, err = rex.session.new_layer{ session_id = ctx.session_id, bounds = { 0.05, 0.05, 0.9, 0.9 },
       focus = true, layout = { block = block } }
-    if err then error(err, 0) end
+    if err then
+      rex.log("info", "glance: no floater here (" .. tostring(err) .. "); opening a session of its own")
+      return own_session(block, label)
+    end
     rex.session.disown_block{ session_id = ctx.session_id }
     -- focus = true should be enough, but the palette closing can hand focus
     -- back to where it was, so focus the new block once more by its id.
@@ -122,10 +151,7 @@ local function glance(ctx)
     end
     return
   end
-  local s, err = rex.call("session.create", { label = label,
-    initial_windows = { { window_label = label, layout = { block = block } } } })
-  if s == nil then error(err, 0) end
-  rex.client.queue("session.select", { session_id = s.session_id })
+  own_session(block, label)
 end
 
 rex.action{
