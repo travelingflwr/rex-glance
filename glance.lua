@@ -1,9 +1,21 @@
--- Glance at…: another machine's screen in a floating window over this one,
--- from Rex's palette. rex-glance asks for the password there (typing hidden)
--- when none is saved. Loaded from init.lua with  pcall(require, "glance")
+-- Glance at…: another machine's screen, from Rex's palette (rex-glance).
 --
---   require("glance").setup{ machines = { { name = "This Mac", host = "localhost" }, "linuxbox" },
---                            bin = "~/.local/bin/rex-glance", key = "ctrl+alt+cmd+g" }
+-- Opens a floating window over the tab you're in; in tr3x's T3 Code session,
+-- or where no floater can go, a session of its own that closes when you quit.
+-- From an app that can't show palette questions (iOS, by default), the window
+-- opens at once and asks which machine there. rex-glance asks for the
+-- password in the window (typing hidden) when none is saved.
+--
+-- Loaded from init.lua:
+--
+--   pcall(function()
+--     require("glance").setup{
+--       machines      = { { name = "This Mac", host = "localhost" }, "linuxbox" },
+--       bin           = "~/.local/bin/rex-glance",   -- the default
+--       ask_in_window = { ios = true },              -- the default; {} once your iPad's Rex can ask
+--       key           = "ctrl+alt+cmd+g",            -- optional
+--     }
+--   end)
 
 local M = {}
 

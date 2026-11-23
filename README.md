@@ -10,70 +10,118 @@ It is **not** a remote desktop to work in all day, and not for video. For that, 
 
 ## What it values
 
-**Latency over looks.**
-
-- Colours are reduced (8- or 16-bit) and the screen is scaled down when that helps.
-- Only the parts of the screen that changed are sent and redrawn.
-- Clicks and keys go out the moment you make them.
-- No HEVC, no audio, no smoothing.
+**Latency over looks.** Clicks and keys go out the moment you make them, and only the parts of the screen that really changed are sent. There's no HEVC, no audio and no smoothing. On a slow link the picture drops to a lower resolution rather than falling behind.
 
 **Nothing to install on the far side.** rex-glance connects to the screen-sharing server the machine already runs:
 
-- **macOS:** Screen Sharing, built in (System Settings → General → Sharing).
+- **macOS:** Screen Sharing, built in.
 - **Linux:** wayvnc (Wayland) or x11vnc (X11).
 
-**It goes where Rex goes.** It's a program that runs in a Rex pane and draws with the kitty graphics protocol, so any Rex client shows it, the phone included. No change to Rex is needed.
+**It goes where Rex goes.** It's a program that runs in a Rex pane and draws with the kitty graphics protocol, so any Rex app shows it, on a Mac or an iPad. No change to Rex is needed.
 
-## Where it's used
+## Install
 
-For now, the two machines here with a desktop: a Mac running Screen Sharing, and a Linux machine running wayvnc. Headless machines have no screen to glance at. Windows comes later, for work machines, and isn't part of this first version.
+You need Go and Rex. rex-glance runs on the machine that runs your Rex server.
 
-## How it connects
+```sh
+go build -o ~/.local/bin/rex-glance .
+ln -s "$PWD/glance.lua" ~/.config/rex/glance.lua
+```
 
-- **The route:** RFB (VNC) through an SSH tunnel over your tailnet, so the screen-sharing port never has to be open on a network.
-- **The login:** Apple Remote Desktop's Diffie-Hellman scheme (security type 30), which macOS Screen Sharing requires and wayvnc offers too, so one login covers Macs and Linux. It uses the far machine's username and password.
-- **The password:** kept in the system keychain, or asked for each time. Never in a file.
+Then add this to `~/.config/rex/init.lua`, naming your machines:
+
+```lua
+pcall(function()
+  require("glance").setup{
+    machines = { { name = "This Mac", host = "localhost" }, "linuxbox" },  -- ssh or tailnet names
+  }
+end)
+```
+
+Run `rex config reload`. **Glance at…** is now in Rex's palette.
+
+## Setting up the machines
+
+**A Mac:** turn on System Settings → General → Sharing → Screen Sharing. rex-glance logs in with your macOS username and password.
+
+**Linux with wayvnc:** wayvnc must allow logins with your account password. In `~/.config/wayvnc/config`:
+
+```ini
+enable_auth=true
+enable_pam=true
+```
+
+Then restart wayvnc. Without `enable_pam`, wayvnc checks the `username` and `password` in its own config instead of your account's. On Debian, wayvnc needs no PAM file of its own: the default `other` service uses your normal login.
+
+wayvnc is often told to listen only on the tailnet address (`address=100.x.y.z`). That's fine: rex-glance tries an SSH tunnel to the machine's localhost first, and falls back to connecting directly over the tailnet, which WireGuard already encrypts.
+
+`rex-glance reach <machine>` checks a machine is reachable, without logging in.
 
 ## Use
 
+In Rex, **Glance at…** picks a machine and opens its screen:
+
+- **Usually** in a floating window over the tab you're in.
+- **In tr3x's T3 Code session**, or anywhere a floater can't go (a session with no tabs), in a session of its own, which closes itself when you quit.
+- **On the iPad,** the window opens straight away and asks which machine there. Rex asks palette questions on every connected app and the first answer wins, so an app that can't show them yet would have its question answered on another device. Set `ask_in_window = {}` in `setup` once yours can.
+
+The first time, it asks for the password with typing hidden, and offers to keep it in the Keychain. It saves the password only after a login works, so a typo is never stored.
+
+### Keys
+
+| Keys | |
+| --- | --- |
+| Typing, Ctrl-C, arrows, Tab, Escape… | Go to the machine as typed |
+| **Ctrl+Option+key** | On a Mac, that key with ⌘: Ctrl+Option+Space is Spotlight, Ctrl+Option+C is copy. Rex keeps ⌘ itself for its own shortcuts. On Linux, Ctrl+Alt stays Ctrl+Alt |
+| **Ctrl-]** | Quit, the way telnet does |
+
+The mouse works as you'd expect: clicks, drags, right-click, the scroll wheel and hover. Rex reports the pointer per pixel, so a click lands where you point.
+
+### From the command line
+
 ```sh
-rex-glance look <machine>          # the screen here: click, scroll and type on it
-rex-glance look <machine> --fast   # half the resolution, about a quarter of the data
+rex-glance look <machine>               # the screen in this pane
+rex-glance look <machine> --fast        # draw at 1×: less sharp, about a quarter of the data
+rex-glance look <machine> --ask         # ask for the password even if one is saved
 rex-glance look <machine> --snapshot out.png
-rex-glance reach <machine>         # can its screen sharing be reached, and how (no login)
-rex-glance bench <machine>         # first frame, encodings, input-to-update time
-rex-glance bench <machine> --rects # just watch: every rectangle the server sends
+rex-glance look --choose Name=host …    # ask in the window which machine
+rex-glance reach <machine>              # can its screen sharing be reached, and how
+rex-glance bench <machine>              # first frame, encodings, input-to-update time
+rex-glance bench <machine> --rects      # watch every rectangle the server sends
+rex-glance probe                        # what this terminal can do
 ```
 
-In Rex, **Glance at…** (from `glance.lua`) picks a machine and opens it in a floating window. In a session another tool manages, such as tr3x's T3 Code session, it opens in a session of its own. The first time, it asks for the password with typing hidden, and offers to keep it in the Keychain once the login works.
+## How it works
 
-Rex asks palette questions on every connected app, and the first answer wins. So when Glance is run from an app that can't show them yet (iOS, by default: `ask_in_window`), it skips the palette and asks which machine in the window itself.
-
-The picture fills the pane. It's drawn at twice the pane's point size and fitted to its cells, so text stays sharp on Retina screens, and each drawn pixel averages the screen pixels it covers, so thin strokes survive the shrinking. `--fast` draws at the point size instead.
-
-Keys reach the machine as typed, Ctrl-C included, so **Ctrl-] quits**, the way telnet does.
-
-Rex keeps ⌘ for its own shortcuts, so on a Mac **Ctrl+Option+key sends ⌘key**, the way [rootshell](https://github.com/kitknox/rootshell) does: Ctrl+Option+C is ⌘C, Ctrl+Option+Space is ⌘Space. rex-glance knows a Mac by its greeting; on Linux, Ctrl+Alt stays itself.
+- **The route:** RFB (VNC), through an SSH tunnel to the machine's localhost (`ssh -W`, no ports forwarded), or directly over the tailnet when the server listens only there.
+- **The login:** Apple Remote Desktop's Diffie-Hellman scheme (security type 30). macOS Screen Sharing requires it and wayvnc offers it too, so one login covers Macs and Linux.
+- **The picture:** the screen is decoded (ZRLE, Zlib, CopyRect, Raw) into memory and drawn with kitty graphics, at twice the pane's point size and fitted to its cells, so text stays sharp on Retina screens. Each drawn pixel averages the screen pixels it covers, so thin strokes survive the shrinking.
 
 ## How it stays fast
 
-- **The server's stream never waits for the screen.** Each update is applied and the next one requested at once. Drawing runs on its own and paints the newest picture, so a slow link to the screen you're looking at shows fewer frames, never older ones.
-- **Only real change is sent.** Changes are tracked on a grid of 32-pixel tiles, and a tile is redrawn only if its pixels differ from what was last drawn. That matters for macOS Screen Sharing, which reports most of a window as changed for a typed letter: measured on a 1920×1080 Mac, it sent two-thirds of the screen about six times a second while someone typed, and without the check that was 2–3 seconds of lag on an iPad. With it, the lag is gone.
-- **It adapts.** If drawing keeps taking more than a quarter of a second, it drops from 2× to 1× and the status line says so.
-- **Every session is logged** to `~/.local/state/rex-glance/last.log`: update sizes and timings, slow draws, stalls and errors.
+- **The server's stream never waits for the screen.** Each update is applied and the next one requested at once. Drawing runs on its own and always paints the newest picture, so a slow link shows fewer frames, never older ones.
+- **Only real change is sent.** Changes are tracked on 32-pixel tiles, and a tile is redrawn only if its pixels differ from what was last drawn. This matters for macOS Screen Sharing, which reports most of a window as changed for a typed letter: on a 1920×1080 Mac it sent two-thirds of the screen about six times a second while someone typed, which was 2–3 seconds of lag on an iPad until this check. Now typing on a Mac is as quick as on Linux.
+- **It adapts.** If drawing keeps taking more than a quarter of a second, it drops from 2× to 1×, and the status line says so.
+
+## When something's wrong
+
+- **Every session is logged** to `~/.local/state/rex-glance/last.log`: update sizes and timings, slow draws, stalls and errors. Read it first.
+- **"login refused"** with a saved password: run `rex-glance look <machine> --ask` to type it again. On Linux, check `enable_pam=true` (above).
+- **"can't reach … screen sharing"**: `rex-glance reach <machine>` shows what each route said.
+- **Slow on one machine:** `rex-glance bench <machine> --rects` shows what its server is sending.
+- **Glance at… missing from the palette:** `glance.lua` didn't load, and Rex loads it inside `pcall`, which hides the error. Running `go test ./...` also checks that it compiles.
+- **A new build doesn't seem to change anything:** an open Glance keeps running the old program. Quit it and start a new one.
 
 ## Plan
 
-1. ✓ **Probes.** Rex replaces image rectangles in place (about 10,000 64×64 tiles a second) and reports the mouse per pixel.
-2. ✓ **Look.** Connect, log in, and show the screen, redrawing only the rectangles that change.
-3. ✓ **Poke.** Clicks, drags, scrolling and keys, mapped from the pane to the remote screen.
-4. ✓ **From the palette.** "Glance at…" picks a machine and opens it.
-5. ✓ **⌘ for Macs** (Ctrl+Option), and asking which machine in the window where Rex's palette can't.
-6. **Next:** zoom around the pointer for small screens; 16-bit colour for slow links.
+- ✓ Look, poke, and Glance at… from the palette, on a Mac and an iPad
+- ✓ ⌘ for Macs (Ctrl+Option)
+- ✓ Fast on macOS Screen Sharing (only real change is sent)
+- **Next:** zoom around the pointer for small screens; 16-bit colour for slow links; Windows machines
 
 ## Credit
 
-The RFB and Apple Screen Sharing details follow [rootshell-vnc](https://github.com/kitknox/rootshell-vnc) by Kit Knox (MIT), the VNC client inside rootshell.
+The RFB and Apple Screen Sharing details follow [rootshell-vnc](https://github.com/kitknox/rootshell-vnc) by Kit Knox (MIT), the VNC client inside rootshell, which is also where the Ctrl+Option-as-⌘ idea comes from.
 
 ## License
 
