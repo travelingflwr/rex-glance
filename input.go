@@ -169,8 +169,14 @@ func parseInput(b []byte, final bool) (evs []event, used int) {
 		case c == 0x7f || c == 0x08:
 			evs = append(evs, event{keysym: ksBackSpace})
 			used++
-		case c < 0x20: // Ctrl and a letter
+		case c == 0: // Ctrl-Space (and Ctrl-@) arrive as a zero byte
+			evs = append(evs, event{keysym: ' ', ctrl: true})
+			used++
+		case c < 0x1b: // Ctrl and a letter
 			evs = append(evs, event{keysym: uint32('a' + c - 1), ctrl: true})
+			used++
+		case c < 0x20: // Ctrl-\, Ctrl-^, Ctrl-_ (Ctrl-] quits, above)
+			evs = append(evs, event{keysym: uint32(c + 0x40), ctrl: true})
 			used++
 
 		default:

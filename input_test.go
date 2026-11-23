@@ -156,6 +156,25 @@ func TestParseChoices(t *testing.T) {
 	}
 }
 
+func TestCtrlSpaceAndOtherControls(t *testing.T) {
+	cases := map[string]string{
+		"\x00":     "C-0x20",   // Ctrl-Space
+		"\x1b\x00": "A-C-0x20", // Ctrl+Option+Space: ⌘Space on a Mac
+		"\x1c":     "C-0x5c",   // Ctrl-\\
+		"\x1f":     "C-0x5f",   // Ctrl-_
+	}
+	for in, want := range cases {
+		evs, _ := parseInput([]byte(in), true)
+		if got := keys(evs); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+	evs, _ := parseInput([]byte("\x1b\x00"), true)
+	if ev := commandChord(evs[0], true); !ev.super || ev.keysym != ' ' || ev.ctrl || ev.alt {
+		t.Fatalf("Ctrl+Option+Space on a Mac: %+v", ev)
+	}
+}
+
 func TestCommandChordOnAMac(t *testing.T) {
 	// Ctrl+Option+C arrives as Escape then Ctrl-C.
 	evs, _ := parseInput([]byte("\x1b\x03"), true)
