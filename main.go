@@ -9,9 +9,11 @@ import (
 
 const usage = `rex-glance: another machine's screen in a Rex pane.
 
-  rex-glance look <machine> [--user U] [--ask] [--snapshot out.png]
+  rex-glance look <machine> [--user U] [--ask] [--fast] [--snapshot out.png]
                        that machine's screen here: click, scroll and type
                        on it; Ctrl-] quits
+  rex-glance look --choose Name=host …
+                       ask in this window which machine, then look
   rex-glance reach <machine>
                        can its screen sharing be reached, and how (no login)
   rex-glance probe     what this terminal can do: sizes, in-place redraws, mouse

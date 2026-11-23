@@ -12,6 +12,11 @@ local config = {
   -- An ssh or tailnet name, or { name = …, host = … }. Set yours with setup.
   machines = { { name = "This Mac", host = "localhost" } },
   bin = home .. "/.local/bin/rex-glance",
+  -- Rex apps on these platforms ask which machine in the window, not the
+  -- palette: Rex asks palette questions on every connected app and the first
+  -- answer wins, so an app that can't show them (the iPad's, for now) would
+  -- have its question answered on another device. Set to {} once yours can.
+  ask_in_window = { ios = true },
 }
 local bound_key = nil
 
@@ -55,19 +60,45 @@ local function managed(session_id)
   return false
 end
 
+-- caller_platform is the platform of the Rex app that ran the action.
+local function caller_platform(ctx)
+  if not (ctx and ctx.client_id) then return nil end
+  local ok, r = pcall(rex.call, "client.list", {})
+  if not ok or type(r) ~= "table" then return nil end
+  for _, c in ipairs(r.clients or r) do
+    if c.client_id == ctx.client_id then return c.info and c.info.platform end
+  end
+  return nil
+end
+
 local function glance(ctx)
   local items = {}
   for _, m in ipairs(config.machines) do
     if type(m) == "string" then m = { name = m, host = m } end
-    items[#items + 1] = { id = m.host, title = m.name, subtitle = m.host ~= m.name and m.host or nil, icon = "terminal" }
+    items[#items + 1] = { id = m.host, title = m.name, subtitle = m.host ~= m.name and m.host or nil, icon = "server" }
   end
-  local host = rex.ui.pick{ title = "Glance at", placeholder = "Which machine", confirm = "Open", items = items }
-  if host == nil then return end
-  local name = host
-  for _, it in ipairs(items) do if it.id == host then name = it.title end end
-  local block = { flavor = "com.superlogical.terminal.shell", label = "Glance: " .. name,
-    options = { shell = "none", login = false,
-      command = { "/bin/sh", "-c", WRAP, "glance", config.bin, "look", host } } }
+  -- Which machine: in the palette, or, for an app that can't show it (or
+  -- when the palette can't ask), in the window, which opens straight away.
+  local host, label = nil, "Glance"
+  local in_window = config.ask_in_window[caller_platform(ctx) or ""] == true
+  if not in_window then
+    local why
+    host, why = rex.ui.pick{ title = "Glance at", placeholder = "Which machine", confirm = "Open", items = items }
+    if host == nil then
+      if why ~= "unsupported" and why ~= "failed" then return end
+      in_window = true
+    end
+  end
+  local command = { "/bin/sh", "-c", WRAP, "glance", config.bin, "look" }
+  if in_window then
+    command[#command + 1] = "--choose"
+    for _, it in ipairs(items) do command[#command + 1] = it.title .. "=" .. it.id end
+  else
+    command[#command + 1] = host
+    for _, it in ipairs(items) do if it.id == host then label = "Glance: " .. it.title end end
+  end
+  local block = { flavor = "com.superlogical.terminal.shell", label = label,
+    options = { shell = "none", login = false, command = command } }
   -- A floater over the window you're in, unless that window is another
   -- tool's to manage: tr3x keeps the T3 Code session in step with T3 and
   -- moves focus back to its own panes, so there Glance gets a session of its
@@ -91,8 +122,8 @@ local function glance(ctx)
     end
     return
   end
-  local s, err = rex.call("session.create", { label = "Glance: " .. name,
-    initial_windows = { { window_label = name, layout = { block = block } } } })
+  local s, err = rex.call("session.create", { label = label,
+    initial_windows = { { window_label = label, layout = { block = block } } } })
   if s == nil then error(err, 0) end
   rex.client.queue("session.select", { session_id = s.session_id })
 end
@@ -110,6 +141,7 @@ function M.setup(opts)
   opts = opts or {}
   if opts.machines ~= nil then config.machines = opts.machines end
   if opts.bin ~= nil then config.bin = opts.bin end
+  if opts.ask_in_window ~= nil then config.ask_in_window = opts.ask_in_window end
   if opts.key ~= nil then
     if bound_key then pcall(rex.unbind, bound_key) end
     bound_key = nil

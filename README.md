@@ -38,11 +38,16 @@ For now, the two machines here with a desktop: a Mac running Screen Sharing, and
 
 ```sh
 rex-glance look <machine>          # the screen here: click, scroll and type on it; Ctrl-] quits
+rex-glance look <machine> --fast   # half the resolution, about a quarter of the data
 rex-glance look <machine> --snapshot out.png
 rex-glance reach <machine>         # can its screen sharing be reached, and how (no login)
 ```
 
 In Rex, **Glance at…** (from `glance.lua`) picks a machine and opens it in a floating window. In a session another tool manages, such as tr3x's T3 Code session, it opens in a session of its own. The first time, it asks for the password with typing hidden, and offers to keep it in the Keychain once the login works.
+
+Rex asks palette questions on every connected app, and the first answer wins. So when Glance is run from an app that can't show them yet (iOS, by default: `ask_in_window`), it skips the palette and asks which machine in the window itself.
+
+The picture fills the pane. It's drawn at twice the pane's point size and fitted to its cells, so text stays sharp on Retina screens, and each drawn pixel averages the screen pixels it covers, so thin strokes survive the shrinking. `--fast` draws at the point size instead.
 
 Keys reach the machine as typed, Ctrl-C included, so Ctrl-] quits, the way telnet does. ⌘ stays with Rex for its own shortcuts, so ⌘-shortcuts don't reach a Mac yet.
 

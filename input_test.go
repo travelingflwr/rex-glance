@@ -147,3 +147,11 @@ func TestSendMapsThePictureToTheScreen(t *testing.T) {
 		t.Fatalf("keys: %v", seq)
 	}
 }
+
+func TestParseChoices(t *testing.T) {
+	got := parseChoices([]string{"This Mac=localhost", "linuxbox", " = ", "Lab = lab.local "})
+	if len(got) != 3 || got[0] != (choice{"This Mac", "localhost"}) || got[1] != (choice{"linuxbox", "linuxbox"}) ||
+		got[2] != (choice{"Lab", "lab.local"}) {
+		t.Fatalf("%+v", got)
+	}
+}

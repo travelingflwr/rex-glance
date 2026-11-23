@@ -229,9 +229,18 @@ func TestScaledSample(t *testing.T) {
 	for i := range fb.Pix {
 		fb.Pix[i] = byte(i)
 	}
-	s := &screen{fb: fb, imgW: 2, imgH: 1}
+	s := &screen{fb: fb, rW: 2, rH: 1}
+	s.buildMaps()
 	ox, oy, w, h, pix := s.sample(Rect{2, 0, 2, 2})
-	if ox != 1 || oy != 0 || w != 1 || h != 1 || len(pix) != 3 || pix[0] != fb.Pix[2*3] {
+	// The right half: pixels (2,0) (3,0) (2,1) (3,1), whose first bytes are
+	// 6, 9, 18 and 21, averaged and rounded: 14.
+	if ox != 1 || oy != 0 || w != 1 || h != 1 || len(pix) != 3 || pix[0] != 14 {
 		t.Fatalf("%d,%d %dx%d %v", ox, oy, w, h, pix)
+	}
+	// Drawn at full size, a pixel is copied as it is.
+	s = &screen{fb: fb, rW: 4, rH: 2}
+	s.buildMaps()
+	if _, _, _, _, pix := s.sample(Rect{1, 1, 1, 1}); pix[0] != fb.Pix[(1*4+1)*3] {
+		t.Fatalf("copied %v", pix)
 	}
 }

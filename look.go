@@ -155,7 +155,9 @@ func lookCmd(args []string) error {
 	userName := fs.String("user", "", "the account to log in as (default: yours)")
 	port := fs.Int("port", 5900, "the screen-sharing port on that machine")
 	snapshot := fs.String("snapshot", "", "save one frame to this PNG and exit")
+	fast := fs.Bool("fast", false, "draw at the pane's point size: less sharp on Retina, about a quarter of the data")
 	ask := fs.Bool("ask", false, "ask for the password even if one is saved")
+	choose := fs.Bool("choose", false, "ask here which machine, from the ones given as Name=host")
 	host := ""
 	// The machine may come before or after the flags.
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -163,6 +165,20 @@ func lookCmd(args []string) error {
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *choose {
+		specs := fs.Args()
+		if host != "" {
+			specs = append([]string{host}, specs...)
+		}
+		ch, err := chooseMachine(parseChoices(specs))
+		if errors.Is(err, errChoseNothing) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		host = ch.host
 	}
 	if host == "" && fs.NArg() > 0 {
 		host = fs.Arg(0)
@@ -201,7 +217,11 @@ func lookCmd(args []string) error {
 	if *snapshot != "" {
 		return snap(c, fb, *snapshot)
 	}
-	return view(c, fb, host)
+	density := 2
+	if *fast {
+		density = 1
+	}
+	return view(c, fb, host, density)
 }
 
 // snap waits for the first full frame and saves it.
@@ -238,54 +258,106 @@ func snap(c *rfbConn, fb *framebuffer, path string) error {
 // ---- the pane ------------------------------------------------------------
 
 type screen struct {
-	mu        sync.Mutex
-	out       io.Writer
-	fb        *framebuffer
-	imgW      int // the picture's size in the pane, in pixels
-	imgH      int
-	rows      int
-	host      string
+	mu   sync.Mutex
+	out  io.Writer
+	fb   *framebuffer
+	host string
+
+	// Where the picture sits: imgW×imgH pane points (what the mouse reports
+	// in), covering cols×crows cells. It's drawn at rW×rH pixels, up to
+	// density times that, and the Rex app fits it to the cells, so text stays
+	// sharp on a Retina screen.
+	imgW, imgH  int
+	cols, crows int
+	rW, rH      int
+	density     int
+	rows        int
+	xs0, xs1    []int // for each drawn column, the screen columns it averages
+	ys0, ys1    []int
+
 	frames    int
 	bytesSent int
 	since     time.Time
 }
 
 // layout fits the remote screen into the pane, keeping its shape and leaving
-// the last row for the status line. It never enlarges.
+// the last row for the status line. It fills the pane even when that's larger
+// than the remote screen: on a high-resolution iPad, the screen's own pixels
+// would cover only part of it, and bigger is easier to click.
 func (s *screen) layout() {
-	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
-	pw, ph, rows := 1280, 720, 24
-	if err == nil {
-		rows = int(ws.Row)
-		if ws.Xpixel > 0 && ws.Ypixel > 0 && ws.Row > 1 {
-			pw = int(ws.Xpixel)
-			ph = int(ws.Ypixel) * (int(ws.Row) - 1) / int(ws.Row)
+	cols, rows, pw, ph := 80, 24, 640, 384
+	if ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ); err == nil && ws.Col > 0 && ws.Row > 1 {
+		cols, rows = int(ws.Col), int(ws.Row)
+		if ws.Xpixel > 0 && ws.Ypixel > 0 {
+			pw, ph = int(ws.Xpixel), int(ws.Ypixel)
+		} else {
+			pw, ph = cols*8, rows*16
 		}
 	}
-	scale := min(float64(pw)/float64(s.fb.W), float64(ph)/float64(s.fb.H), 1)
-	s.imgW, s.imgH, s.rows = max(1, int(float64(s.fb.W)*scale)), max(1, int(float64(s.fb.H)*scale)), rows
+	cw, ch := max(1, pw/cols), max(1, ph/rows)
+	availW, availH := float64(cols*cw), float64((rows-1)*ch)
+	scale := min(availW/float64(s.fb.W), availH/float64(s.fb.H))
+	c := clamp(int(float64(s.fb.W)*scale/float64(cw)+0.5), 1, cols)
+	r := clamp(int(float64(s.fb.H)*scale/float64(ch)+0.5), 1, rows-1)
+	s.cols, s.crows, s.rows = c, r, rows
+	s.imgW, s.imgH = c*cw, r*ch
+	d := max(1, s.density)
+	s.rW, s.rH = min(s.fb.W, s.imgW*d), min(s.fb.H, s.imgH*d)
+	s.buildMaps()
 }
 
-// sample is the area of the picture covering the framebuffer rectangle r,
-// as RGB, scaled by picking the nearest pixel (fast, and fine for a glance).
+// buildMaps works out, once per layout, which screen pixels each drawn pixel
+// averages.
+func (s *screen) buildMaps() {
+	span := func(n, src int) ([]int, []int) {
+		a, b := make([]int, n), make([]int, n)
+		for i := 0; i < n; i++ {
+			a[i] = i * src / n
+			b[i] = max(a[i]+1, (i+1)*src/n)
+		}
+		return a, b
+	}
+	s.xs0, s.xs1 = span(s.rW, s.fb.W)
+	s.ys0, s.ys1 = span(s.rH, s.fb.H)
+}
+
+// sample is the drawn area covering the framebuffer rectangle r, as RGB.
+// Each drawn pixel is the average of the screen pixels it covers, so thin
+// text strokes survive the shrinking.
 func (s *screen) sample(r Rect) (ox, oy, ow, oh int, pix []byte) {
-	fx := float64(s.imgW) / float64(s.fb.W)
-	fy := float64(s.imgH) / float64(s.fb.H)
+	fx := float64(s.rW) / float64(s.fb.W)
+	fy := float64(s.rH) / float64(s.fb.H)
 	ox, oy = int(float64(r.X)*fx), int(float64(r.Y)*fy)
-	ox1 := min(s.imgW, int(float64(r.X+r.W)*fx+0.999))
-	oy1 := min(s.imgH, int(float64(r.Y+r.H)*fy+0.999))
+	ox1 := min(s.rW, int(float64(r.X+r.W)*fx+0.999))
+	oy1 := min(s.rH, int(float64(r.Y+r.H)*fy+0.999))
 	ow, oh = ox1-ox, oy1-oy
 	if ow <= 0 || oh <= 0 {
 		return 0, 0, 0, 0, nil
 	}
 	pix = make([]byte, ow*oh*3)
 	i := 0
+	W := s.fb.W
 	for y := oy; y < oy1; y++ {
-		sy := min(s.fb.H-1, y*s.fb.H/s.imgH)
-		row := sy * s.fb.W * 3
+		y0, y1 := s.ys0[y], s.ys1[y]
 		for x := ox; x < ox1; x++ {
-			sx := min(s.fb.W-1, x*s.fb.W/s.imgW)
-			copy(pix[i:i+3], s.fb.Pix[row+sx*3:])
+			x0, x1 := s.xs0[x], s.xs1[x]
+			if y1-y0 == 1 && x1-x0 == 1 {
+				copy(pix[i:i+3], s.fb.Pix[(y0*W+x0)*3:])
+				i += 3
+				continue
+			}
+			var sr, sg, sb, n int
+			for yy := y0; yy < y1; yy++ {
+				row := (yy*W + x0) * 3
+				for xx := x0; xx < x1; xx++ {
+					sr += int(s.fb.Pix[row])
+					sg += int(s.fb.Pix[row+1])
+					sb += int(s.fb.Pix[row+2])
+					row += 3
+					n++
+				}
+			}
+			pix[i], pix[i+1], pix[i+2] = byte((sr+n/2)/n), byte((sg+n/2)/n), byte((sb+n/2)/n)
 			i += 3
 		}
 	}
@@ -306,7 +378,7 @@ func (s *screen) full() {
 	_, _, w, h, pix := s.sample(Rect{0, 0, s.fb.W, s.fb.H})
 	var b bytes.Buffer
 	b.WriteString("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[H\x1b[2J")
-	kitty(&b, fmt.Sprintf("a=T,i=1,f=24,s=%d,v=%d,o=z,q=2,C=1", w, h), deflate(pix))
+	kitty(&b, fmt.Sprintf("a=T,i=1,f=24,s=%d,v=%d,c=%d,r=%d,o=z,q=2,C=1", w, h, s.cols, s.crows), deflate(pix))
 	s.write(b.Bytes())
 	s.status()
 }
@@ -392,14 +464,14 @@ func (s *screen) status() {
 	s.write([]byte(fmt.Sprintf("\x1b7\x1b[%d;1H\x1b[2K\x1b[7m%s\x1b[0m\x1b8", s.rows, line)))
 }
 
-func view(c *rfbConn, fb *framebuffer, host string) error {
+func view(c *rfbConn, fb *framebuffer, host string, density int) error {
 	fd := int(os.Stdin.Fd())
 	old, err := term.MakeRaw(fd)
 	if err != nil {
 		return fmt.Errorf("look needs a terminal (or use --snapshot): %w", err)
 	}
 	defer term.Restore(fd, old)
-	s := &screen{out: os.Stdout, fb: fb, host: host, since: time.Now()}
+	s := &screen{out: os.Stdout, fb: fb, host: host, density: density, since: time.Now()}
 	os.Stdout.WriteString("\x1b]2;Glance: " + host + "\x07") // the pane's title
 	os.Stdout.WriteString("\x1b[?25l")                       // hide the cursor
 	defer os.Stdout.WriteString("\x1b_Ga=d,d=I,i=1,q=2\x1b\\\x1b[?25h\x1b[H\x1b[2J")
