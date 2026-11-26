@@ -63,7 +63,7 @@ In Rex, **Glance at…** picks a machine and opens its screen:
 
 - **Usually** in a floating window over the tab you're in.
 - **In tr3x's T3 Code session**, or anywhere a floater can't go (a session with no tabs), in a session of its own, which closes itself when you quit.
-- **On the iPad,** the window opens straight away and asks which machine there. Rex asks palette questions on every connected app and the first answer wins, so an app that can't show them yet would have its question answered on another device. Set `ask_in_window = {}` in `setup` once yours can.
+- **On the iPad,** Rex 0.1.1 or later asks which machine in the palette, like the Mac. Rex asks palette questions on every connected app and the first answer wins, so for an app that can't show them, list its platform in `ask_in_window` (such as `{ ios = true }`) and the window opens straight away and asks there.
 
 The first time, it asks for the password with typing hidden, and offers to keep it in the Keychain. It saves the password only after a login works, so a typo is never stored.
 

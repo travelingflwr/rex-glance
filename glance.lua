@@ -2,8 +2,9 @@
 --
 -- Opens a floating window over the tab you're in; in tr3x's T3 Code session,
 -- or where no floater can go, a session of its own that closes when you quit.
--- From an app that can't show palette questions (iOS, by default), the window
--- opens at once and asks which machine there. rex-glance asks for the
+-- Which machine is asked in the palette (rex.ui.pick); for a platform listed
+-- in ask_in_window, or when the palette can't ask, the window opens at once
+-- and asks there instead. rex-glance asks for the
 -- password in the window (typing hidden) when none is saved.
 --
 -- Loaded from init.lua:
@@ -12,7 +13,7 @@
 --     require("glance").setup{
 --       machines      = { { name = "This Mac", host = "localhost" }, "linuxbox" },
 --       bin           = "~/.local/bin/rex-glance",   -- the default
---       ask_in_window = { ios = true },              -- the default; {} once your iPad's Rex can ask
+--       ask_in_window = {},                          -- the default; e.g. { ios = true } for an app that can't ask
 --       key           = "ctrl+alt+cmd+g",            -- optional
 --     }
 --   end)
@@ -26,9 +27,10 @@ local config = {
   bin = home .. "/.local/bin/rex-glance",
   -- Rex apps on these platforms ask which machine in the window, not the
   -- palette: Rex asks palette questions on every connected app and the first
-  -- answer wins, so an app that can't show them (the iPad's, for now) would
-  -- have its question answered on another device. Set to {} once yours can.
-  ask_in_window = { ios = true },
+  -- answer wins, so an app that can't show them would have its question
+  -- answered on another device. Every Rex app can since iOS 0.1.1 (build
+  -- 2127), so none by default; list a platform here to keep it in the window.
+  ask_in_window = {},
 }
 local bound_key = nil
 
@@ -43,15 +45,20 @@ exit $s
 
 -- The same, for a Glance in a session of its own: when it ends, the session
 -- goes too, rather than staying behind with no tabs.
+--
+-- Rex server preview.24 stopped setting REX_SESSION in new panes, so when
+-- it's empty the session comes from the pane's block (REX_BLOCK).
+local WRAP_OWN_HEAD = [[
+r=rex; command -v rex >/dev/null 2>&1 || r="$REX_BIN_DIR/rex"
+if [ -z "$REX_SESSION" ] && [ -n "$REX_BLOCK" ]; then
+  REX_SESSION=$("$r" block inspect "$REX_BLOCK" 2>/dev/null | awk '/^session:/ { print $2; exit }')
+fi
+]]
 local WRAP_OWN = [[
 "$@"
 s=$?
 if [ $s -ne 0 ]; then printf '\nPress Return to close. '; read -r _; fi
-if [ -n "$REX_SESSION" ]; then
-  for r in rex "$REX_BIN_DIR/rex"; do
-    command -v "$r" >/dev/null 2>&1 && { "$r" kill "$REX_SESSION" >/dev/null 2>&1; break; }
-  done
-fi
+[ -n "$REX_SESSION" ] && "$r" kill "$REX_SESSION" >/dev/null 2>&1
 exit $s
 ]]
 
@@ -99,12 +106,35 @@ end
 
 -- own_session opens Glance in a new session and switches to it. The
 -- session closes itself when Glance ends.
-local function own_session(block, label)
-  block.options.command[3] = WRAP_OWN
+--
+-- Rex for iOS learns about a new session a moment after it's created, so a
+-- Go to Session queued straight away fails with "The session isn't available
+-- right now". For those apps, the new pane asks the app to go there itself,
+-- trying every half second for up to 3 seconds (the first try usually works).
+local late_select = { ios = true }
+
+local function own_session(block, label, ctx)
+  local platform = caller_platform(ctx) or ""
+  local client = ctx and ctx.client_id
+  local delayed = late_select[platform] == true and type(client) == "string"
+    and client:match("^[%w:%-]+$") ~= nil
+  local script = WRAP_OWN_HEAD .. WRAP_OWN
+  if delayed then
+    script = WRAP_OWN_HEAD .. string.format([[
+(i=0
+ while [ $i -lt 6 ]; do
+   sleep 0.5; i=$((i+1))
+   "$r" do -C %s session.select session_id="$REX_SESSION" >/dev/null 2>&1 && break
+ done) &
+]], client) .. WRAP_OWN
+  end
+  block.options.command[3] = script
   local s, err = rex.call("session.create", { label = label,
     initial_windows = { { window_label = label, layout = { block = block } } } })
   if s == nil then error(err, 0) end
-  rex.client.queue("session.select", { session_id = s.session_id })
+  if not delayed then
+    rex.client.queue("session.select", { session_id = s.session_id })
+  end
 end
 
 local function glance(ctx)
@@ -146,7 +176,7 @@ local function glance(ctx)
       focus = true, layout = { block = block } }
     if err then
       rex.log("info", "glance: no floater here (" .. tostring(err) .. "); opening a session of its own")
-      return own_session(block, label)
+      return own_session(block, label, ctx)
     end
     rex.session.disown_block{ session_id = ctx.session_id }
     -- focus = true should be enough, but the palette closing can hand focus
@@ -163,7 +193,7 @@ local function glance(ctx)
     end
     return
   end
-  own_session(block, label)
+  own_session(block, label, ctx)
 end
 
 rex.action{
